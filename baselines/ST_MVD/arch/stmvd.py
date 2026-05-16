@@ -42,9 +42,9 @@ class STMVD(nn.Module):
         time_of_day_size: number of ToD slots (e.g., 288 for 5-min intervals).
         day_of_week_size: 7.
         if_D_i_W: whether to use DoW embedding (disable if DoW signal is noisy).
-        num_layer: number of MLP layers per decoder branch.
-        mvt_num_views: number of parallel temporal branches V.
-        mvt_out_dim: per-branch output dimension.
+        num_layer: number of MLP layers per temporal branch.
+        num_temporal_branches: number of parallel temporal branches.
+        temporal_branch_dim: per-branch output dimension.
         fingerprint_seed: seed for random orthogonal fingerprint.
     """
 
@@ -61,11 +61,10 @@ class STMVD(nn.Module):
                  if_T_i_D: bool = True,
                  if_D_i_W: bool = True,
                  num_layer: int = 3,
-                 mvt_num_views: int = 2,
-                 mvt_out_dim: int = 16,
+                 num_temporal_branches: int = 2,
+                 temporal_branch_dim: int = 16,
                  fingerprint_seed: int = 42,
-                 mlp_dropout: float = 0.15,
-                 **kwargs):
+                 mlp_dropout: float = 0.15):
         super().__init__()
         self.num_nodes = num_nodes
         self.input_len = input_len
@@ -79,8 +78,8 @@ class STMVD(nn.Module):
         self.if_time_in_day = if_T_i_D
         self.if_day_in_week = if_D_i_W
         self.num_layer = num_layer
-        self.mvt_num_views = mvt_num_views
-        self.mvt_out_dim = mvt_out_dim
+        self.num_temporal_branches = num_temporal_branches
+        self.temporal_branch_dim = temporal_branch_dim
 
         # ---- Relational axis: random orthogonal fingerprints (frozen) ----
         fingerprints = build_orthogonal_fingerprints(num_nodes, num_views, fingerprint_seed)
@@ -109,24 +108,26 @@ class STMVD(nn.Module):
                           + temp_dim_tid * int(if_T_i_D)
                           + temp_dim_diw * int(if_D_i_W))
 
-        # ---- Temporal axis: parallel multi-view branches ----
+        # ---- Temporal axis: parallel temporal branches ----
         # Each branch: independent ToD/DoW embedding + 3-layer MLP + linear out
-        self.mvt_branches = nn.ModuleList()
-        self.mvt_tod_embs = nn.ParameterList()
-        self.mvt_dow_embs = nn.ParameterList()
-        for _ in range(mvt_num_views):
-            self.mvt_branches.append(self._build_branch(self.hidden_dim, num_layer, mvt_out_dim, mlp_dropout))
+        self.temporal_branches = nn.ModuleList()
+        self.temporal_tod_embeddings = nn.ParameterList()
+        self.temporal_dow_embeddings = nn.ParameterList()
+        for _ in range(num_temporal_branches):
+            self.temporal_branches.append(
+                self._build_branch(self.hidden_dim, num_layer, temporal_branch_dim, mlp_dropout)
+            )
             if if_T_i_D:
                 tod_emb = nn.Parameter(torch.empty(time_of_day_size, temp_dim_tid))
                 nn.init.xavier_uniform_(tod_emb)
-                self.mvt_tod_embs.append(tod_emb)
+                self.temporal_tod_embeddings.append(tod_emb)
             if if_D_i_W:
                 dow_emb = nn.Parameter(torch.empty(day_of_week_size, temp_dim_diw))
                 nn.init.xavier_uniform_(dow_emb)
-                self.mvt_dow_embs.append(dow_emb)
+                self.temporal_dow_embeddings.append(dow_emb)
 
         # Final regression: concat of branch outputs -> output_len
-        self.regression_layer = nn.Linear(mvt_num_views * mvt_out_dim, output_len)
+        self.regression_layer = nn.Linear(num_temporal_branches * temporal_branch_dim, output_len)
 
     @staticmethod
     def _build_branch(in_dim: int, num_layer: int, out_dim: int, dropout: float) -> nn.ModuleDict:
@@ -204,7 +205,7 @@ class STMVD(nn.Module):
         node_base_features = torch.cat([frequency_features, relational_features], dim=1)
         node_base_features = node_base_features.squeeze(-1).transpose(1, 2)  # (B, N, D_base)
 
-        # === Temporal axis: parallel MV branches ===
+        # === Temporal axis: parallel temporal branches ===
         # Lookup ToD/DoW indices from the last input timestep
         if self.if_time_in_day:
             tod_idx = (history_data[:, -1, :, 1] * self.time_of_day_size).long()  # (B, N)
@@ -212,12 +213,12 @@ class STMVD(nn.Module):
             dow_idx = (history_data[:, -1, :, 2] * self.day_of_week_size).long()  # (B, N)
 
         branch_preds = []
-        for v, branch in enumerate(self.mvt_branches):
+        for v, branch in enumerate(self.temporal_branches):
             temporal_parts = []
             if self.if_time_in_day:
-                temporal_parts.append(self.mvt_tod_embs[v][tod_idx])  # (B, N, temp_dim_tid)
+                temporal_parts.append(self.temporal_tod_embeddings[v][tod_idx])  # (B, N, temp_dim_tid)
             if self.if_day_in_week:
-                temporal_parts.append(self.mvt_dow_embs[v][dow_idx])  # (B, N, temp_dim_diw)
+                temporal_parts.append(self.temporal_dow_embeddings[v][dow_idx])  # (B, N, temp_dim_diw)
             branch_input = torch.cat([node_base_features] + temporal_parts, dim=-1)  # (B, N, hidden_dim)
 
             # (B, N, D) -> (B, D, N, 1) for Conv2d-based MLPs
@@ -225,9 +226,9 @@ class STMVD(nn.Module):
             for layer in branch['layers']:
                 h = layer(h)
             h = h.squeeze(-1).transpose(1, 2)  # (B, N, D)
-            pred = branch['out_proj'](h)  # (B, N, mvt_out_dim)
+            pred = branch['out_proj'](h)  # (B, N, temporal_branch_dim)
             branch_preds.append(pred)
 
-        branch_outputs = torch.cat(branch_preds, dim=-1)  # (B, N, V*mvt_out_dim)
+        branch_outputs = torch.cat(branch_preds, dim=-1)  # (B, N, V_t*temporal_branch_dim)
         prediction = self.regression_layer(branch_outputs)  # (B, N, T_out)
         return prediction.transpose(1, 2).unsqueeze(-1)  # (B, T_out, N, 1)

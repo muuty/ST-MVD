@@ -28,7 +28,7 @@ MODEL_PARAM = EasyDict({
     "temp_dim_tid": 32, "temp_dim_diw": 32,
     "time_of_day_size": 288, "day_of_week_size": 7,
     # Temporal: V_t parallel branches, each with a 3-layer MLP
-    "mvt_num_views": 4, "mvt_out_dim": 16, "num_layer": 3,
+    "num_temporal_branches": 4, "temporal_branch_dim": 16, "num_layer": 3,
 })
 
 NUM_EPOCHS = 100
