@@ -191,18 +191,18 @@ class STMVD(nn.Module):
         # === Input axis: FFT decomposition -> 5 views ===
         views = self._decompose_input(flow)  # list of (B, T, N)
         views_stacked = torch.stack(views, dim=-1)  # (B, T, N, 5)
-        time_series_emb = views_stacked.permute(0, 3, 1, 2).reshape(batch_size, self.ts_dim, self.num_nodes, 1)
+        frequency_features = views_stacked.permute(0, 3, 1, 2).reshape(batch_size, self.ts_dim, self.num_nodes, 1)
 
         # === Relational axis: fingerprints + interpreter MLPs ===
         node_emb = self._compute_node_embedding()  # (N, relational_dim)
-        node_emb_bct = (node_emb.unsqueeze(0)
-                        .expand(batch_size, -1, -1)
-                        .transpose(1, 2)
-                        .unsqueeze(-1))  # (B, relational_dim, N, 1)
+        relational_features = (node_emb.unsqueeze(0)
+                               .expand(batch_size, -1, -1)
+                               .transpose(1, 2)
+                               .unsqueeze(-1))  # (B, relational_dim, N, 1)
 
-        # Base (without temporal) = concat(flow_views, node_emb)
-        base_no_temporal = torch.cat([time_series_emb, node_emb_bct], dim=1)
-        base_no_temporal = base_no_temporal.squeeze(-1).transpose(1, 2)  # (B, N, D_base)
+        # Combine frequency history and relational identity before adding branch-specific temporal embeddings.
+        node_base_features = torch.cat([frequency_features, relational_features], dim=1)
+        node_base_features = node_base_features.squeeze(-1).transpose(1, 2)  # (B, N, D_base)
 
         # === Temporal axis: parallel MV branches ===
         # Lookup ToD/DoW indices from the last input timestep
@@ -218,7 +218,7 @@ class STMVD(nn.Module):
                 temporal_parts.append(self.mvt_tod_embs[v][tod_idx])  # (B, N, temp_dim_tid)
             if self.if_day_in_week:
                 temporal_parts.append(self.mvt_dow_embs[v][dow_idx])  # (B, N, temp_dim_diw)
-            branch_input = torch.cat([base_no_temporal] + temporal_parts, dim=-1)  # (B, N, hidden_dim)
+            branch_input = torch.cat([node_base_features] + temporal_parts, dim=-1)  # (B, N, hidden_dim)
 
             # (B, N, D) -> (B, D, N, 1) for Conv2d-based MLPs
             h = branch_input.transpose(1, 2).unsqueeze(-1)
@@ -228,6 +228,6 @@ class STMVD(nn.Module):
             pred = branch['out_proj'](h)  # (B, N, mvt_out_dim)
             branch_preds.append(pred)
 
-        fused = torch.cat(branch_preds, dim=-1)  # (B, N, V*mvt_out_dim)
-        prediction = self.regression_layer(fused)  # (B, N, T_out)
+        branch_outputs = torch.cat(branch_preds, dim=-1)  # (B, N, V*mvt_out_dim)
+        prediction = self.regression_layer(branch_outputs)  # (B, N, T_out)
         return prediction.transpose(1, 2).unsqueeze(-1)  # (B, T_out, N, 1)
