@@ -15,16 +15,25 @@ import torch.nn as nn
 from .mlp import MultiLayerPerceptron
 
 
-def build_orthogonal_fingerprints(num_nodes: int, num_views: int, seed: int) -> torch.Tensor:
-    """Build K random orthogonal fingerprint matrices, each (N, N).
+def build_orthogonal_fingerprints(num_nodes: int, num_views: int, seed: int,
+                                  fingerprint_dim: int | None = None) -> torch.Tensor:
+    """Build K fingerprint matrices.
 
-    Returns: (num_views, N, N), one row per node and view.
+    fingerprint_dim is None: random orthogonal N x N (rows orthonormal in R^N).
+    fingerprint_dim = d:     random Gaussian N x d, entries N(0, 1/d) -- JL random projection.
+                             Pairwise row geometry preserved up to (1+/-eps) for d = O(log N / eps^2).
+
+    Returns: (num_views, N, d) where d defaults to N.
     """
     generator = torch.Generator().manual_seed(seed)
     views = []
     for _ in range(num_views):
-        q, _ = torch.linalg.qr(torch.randn(num_nodes, num_nodes, generator=generator))
-        views.append(q)
+        if fingerprint_dim is None:
+            q, _ = torch.linalg.qr(torch.randn(num_nodes, num_nodes, generator=generator))
+            views.append(q)
+        else:
+            g = torch.randn(num_nodes, fingerprint_dim, generator=generator) / (fingerprint_dim ** 0.5)
+            views.append(g)
     return torch.stack(views, dim=0)
 
 
@@ -46,6 +55,8 @@ class STMVD(nn.Module):
         num_temporal_branches: number of parallel temporal branches.
         temporal_branch_dim: per-branch output dimension.
         fingerprint_seed: seed for random orthogonal fingerprint.
+        fingerprint_dim: if None, use N x N orthogonal fingerprints (default).
+            If an int d, use N x d random Gaussian fingerprints (JL random projection).
     """
 
     def __init__(self,
@@ -64,6 +75,7 @@ class STMVD(nn.Module):
                  num_temporal_branches: int = 2,
                  temporal_branch_dim: int = 16,
                  fingerprint_seed: int = 42,
+                 fingerprint_dim: int | None = None,
                  mlp_dropout: float = 0.15):
         super().__init__()
         self.num_nodes = num_nodes
@@ -80,15 +92,18 @@ class STMVD(nn.Module):
         self.num_layer = num_layer
         self.num_temporal_branches = num_temporal_branches
         self.temporal_branch_dim = temporal_branch_dim
+        self.fingerprint_dim = fingerprint_dim
 
         # ---- Relational axis: random orthogonal fingerprints (frozen) ----
-        fingerprints = build_orthogonal_fingerprints(num_nodes, num_views, fingerprint_seed)
+        # fingerprint_dim is None -> N x N orthogonal; int -> N x d Gaussian (JL).
+        fp_in_dim = num_nodes if fingerprint_dim is None else fingerprint_dim
+        fingerprints = build_orthogonal_fingerprints(num_nodes, num_views, fingerprint_seed, fingerprint_dim)
         self.register_buffer('node_fingerprints', fingerprints)
 
-        # Shared interpreter MLPs: N-dim code -> node_dim
+        # Shared interpreter MLPs: fp_in_dim -> node_dim
         self.interpreter_mlps = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(num_nodes, node_dim),
+                nn.Linear(fp_in_dim, node_dim),
                 nn.ReLU(),
                 nn.Dropout(0.2),
                 nn.Linear(node_dim, node_dim),
