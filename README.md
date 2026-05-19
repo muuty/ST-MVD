@@ -63,39 +63,47 @@ Run from the repository root:
 python experiments/train.py -c baselines/ST_MVD/PEMS04.py -g 0
 ```
 
-Available configs:
+Available configs match the main-paper ST-MVD settings:
 
-| Config | Nodes | Relational views K | Temporal branches V_t | Day-of-week embedding |
-| --- | ---: | ---: | ---: | --- |
-| `baselines/ST_MVD/PEMS03.py` | 358 | 2 | 4 | No |
-| `baselines/ST_MVD/PEMS04.py` | 307 | 3 | 4 | Yes |
-| `baselines/ST_MVD/PEMS07.py` | 883 | 3 | 4 | Yes |
-| `baselines/ST_MVD/PEMS08.py` | 170 | 2 | 4 | Yes |
+| Config | Nodes | Relational views K | Per-view dim | Temporal branches V_t | ToD | DoW |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| `baselines/ST_MVD/PEMS03.py` | 358 | 2 | 24 | 4 | Yes | No |
+| `baselines/ST_MVD/PEMS04.py` | 307 | 3 | 42 | 4 | Yes | Yes |
+| `baselines/ST_MVD/PEMS07.py` | 883 | 3 | 42 | 4 | Yes | Yes |
+| `baselines/ST_MVD/PEMS08.py` | 170 | 2 | 24 | 5 | Yes | Yes |
+
+## Reproducibility
+
+The four released configs are the exact main-result configurations. Each config
+sets `CFG.ENV = {'SEED': 42, 'DETERMINISTIC': True}` and uses
+`fingerprint_seed = 42` for the frozen random orthogonal fingerprints.
+
+Shared training hyperparameters:
+
+| Hyperparameter | Value |
+| --- | --- |
+| Input / output length | 12 / 12 |
+| Epochs | 100 |
+| Optimizer | Adam |
+| Learning rate | 0.002 |
+| Weight decay | 0.0001 |
+| LR schedule | MultiStepLR at epochs 1, 20, 40, 60, 80, gamma 0.5 |
+| Gradient clipping | max norm 5.0 |
+| Train / val / test batch size | 32 / 64 / 64 |
+| Input-frequency views | 5 |
+| Temporal branch output dim | 16 |
+| Decoder depth | 3 residual MLP blocks |
 
 ## Model
 
 ST-MVD is a graph-free MLP model that builds explicit views before forecasting:
 
 - frequency views from a network-wide mean signal and frequency-band residuals;
-- relational views from frozen orthogonal fingerprints interpreted by small MLPs;
+- relational views from frozen orthogonal fingerprints interpreted by shared MLPs;
 - temporal views from parallel branches with independent temporal embeddings.
 
 The main model class is `STMVD` in `baselines/ST_MVD/arch/stmvd.py`.
 
 ## Acknowledgement
 
-This codebase uses the BasicTS training framework. If this repository is useful
-for your work, please also cite BasicTS:
-
-```bibtex
-@article{shao2024exploring,
-  title={Exploring progress in multivariate time series forecasting: Comprehensive benchmarking and heterogeneity analysis},
-  author={Shao, Zezhi and Wang, Fei and Xu, Yongjun and Wei, Wei and Yu, Chengqing and Zhang, Zhao and Yao, Di and Sun, Tao and Jin, Guangyin and Cao, Xin and others},
-  journal={IEEE Transactions on Knowledge and Data Engineering},
-  year={2024},
-  volume={37},
-  number={1},
-  pages={291-305},
-  publisher={IEEE}
-}
-```
+Built on the [BasicTS](https://github.com/GestaltCogTeam/BasicTS) training framework.
